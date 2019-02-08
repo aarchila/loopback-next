@@ -230,6 +230,14 @@ function runTestsWithRouter(router: RestRouter) {
       async findPendingOrders(): Promise<object[]> {
         return [];
       }
+      // A path overlaps with `/order/{id}`. Please note a different var name
+      // is used - `{orderId}`
+      @get('/orders/{orderId}/shipments')
+      async getShipmentsForOrder(
+        @param.path.number('orderId') id: number,
+      ): Promise<object> {
+        return [];
+      }
     }
 
     const table = givenRoutingTable();
@@ -246,6 +254,7 @@ function runTestsWithRouter(router: RestRouter) {
     };
 
     findAndCheckRoute('/orders/1', '/orders/{id}');
+    findAndCheckRoute('/orders/1/shipments', '/orders/{orderId}/shipments');
     findAndCheckRoute('/orders', '/orders');
     findAndCheckRoute('/orders/', '/orders');
     findAndCheckRoute('/pendingOrders', '/pendingOrders');
