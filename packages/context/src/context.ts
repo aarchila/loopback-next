@@ -53,6 +53,14 @@ export class Context extends EventEmitter {
   protected _parent?: Context;
 
   /**
+   * Event listeners for parent context mapped by event names
+   */
+  // tslint:disable-next-line:no-any
+  protected _parentEventListeners:
+    | Map<string, (...args: any[]) => void>
+    | undefined;
+
+  /**
    * A list of registered context observers
    */
   protected readonly observers: Set<ContextEventObserver> = new Set();
@@ -139,10 +147,52 @@ export class Context extends EventEmitter {
       this.emit('error', ...args);
     };
 
+    this.addParentEventListener('bind');
+    this.addParentEventListener('unbind');
+
     // The following are two async functions. Returned promises are ignored as
     // they are long-running background tasks.
     this.startNotificationTask('bind').catch(notificationErrorHandler);
     this.startNotificationTask('unbind').catch(notificationErrorHandler);
+  }
+
+  /**
+   * Add an event listener to its parent context so that this context will
+   * be notified of parent events, such as `bind` or `unbind`.
+   * @param event Event name
+   */
+  private addParentEventListener(event: string) {
+    if (this._parent == null) return;
+    const parentEventListener = (
+      binding: Binding<unknown>,
+      context: Context,
+    ) => {
+      // Propagate the event to this context only if the binding key does not
+      // exist in this context. The parent binding is shadowed if there is a
+      // binding with the same key in this one.
+      if (this.contains(binding.key)) {
+        this._debug(
+          'Event %s %s is not re-emitted from %s to %s',
+          event,
+          binding.key,
+          context.name,
+          this.name,
+        );
+        return;
+      }
+      this._debug(
+        'Re-emitting %s %s from %s to %s',
+        event,
+        binding.key,
+        context.name,
+        this.name,
+      );
+      this.emit(event, binding, context);
+    };
+    // Keep track of parent event listeners so that we can remove them
+    this._parentEventListeners = this._parentEventListeners || new Map();
+    this._parentEventListeners.set(event, parentEventListener);
+    this._parent.on(event, parentEventListener);
   }
 
   /**
@@ -151,7 +201,7 @@ export class Context extends EventEmitter {
    */
   private async startNotificationTask(eventType: ContextEventType) {
     const notificationEvent = `${eventType}-notification`;
-    this.on(eventType, binding => {
+    this.on(eventType, (binding, context) => {
       // No need to schedule notifications if no observers are present
       if (this.observers.size === 0) return;
       // Track pending events
@@ -161,6 +211,7 @@ export class Context extends EventEmitter {
       // current context observers.
       this.emit(notificationEvent, {
         binding,
+        context,
         observers: new Set(this.observers),
       });
     });
@@ -168,13 +219,14 @@ export class Context extends EventEmitter {
     // Create an async iterator from the given event type
     const events: AsyncIterable<{
       binding: Readonly<Binding<unknown>>;
+      context: Context;
       observers: Set<ContextEventObserver>;
     }> = pEvent.iterator(this, notificationEvent);
-    for await (const {binding, observers} of events) {
+    for await (const {binding, context, observers} of events) {
       // The loop will happen asynchronously upon events
       try {
         // The execution of observers happen in the Promise micro-task queue
-        await this.notifyObservers(eventType, binding, observers);
+        await this.notifyObservers(eventType, binding, context, observers);
         this.pendingEvents--;
         this._debug(
           'Observers notified for %s of binding %s',
@@ -237,9 +289,9 @@ export class Context extends EventEmitter {
     this.registry.set(key, binding);
     if (existingBinding !== binding) {
       if (existingBinding != null) {
-        this.emit('unbind', existingBinding);
+        this.emit('unbind', existingBinding, this);
       }
-      this.emit('bind', binding);
+      this.emit('bind', binding, this);
     }
     return this;
   }
@@ -263,33 +315,25 @@ export class Context extends EventEmitter {
     if (binding && binding.isLocked)
       throw new Error(`Cannot unbind key "${key}" of a locked binding`);
     this.registry.delete(key);
-    this.emit('unbind', binding);
+    this.emit('unbind', binding, this);
     return true;
   }
 
   /**
-   * Add a context event observer to the context chain, including its ancestors
+   * Add a context event observer to the context
    * @param observer Context observer instance or function
    */
   subscribe(observer: ContextEventObserver): Subscription {
-    let ctx: Context | undefined = this;
-    while (ctx != null) {
-      ctx.observers.add(observer);
-      ctx = ctx._parent;
-    }
+    this.observers.add(observer);
     return new ContextSubscription(this, observer);
   }
 
   /**
-   * Remove the context event observer from the context chain
+   * Remove the context event observer from the context
    * @param observer Context event observer
    */
-  unsubscribe(observer: ContextEventObserver) {
-    let ctx: Context | undefined = this;
-    while (ctx != null) {
-      ctx.observers.delete(observer);
-      ctx = ctx._parent;
-    }
+  unsubscribe(observer: ContextEventObserver): boolean {
+    return this.observers.delete(observer);
   }
 
   /**
@@ -297,15 +341,19 @@ export class Context extends EventEmitter {
    * chain.
    *
    * This method MUST be called to avoid memory leaks once a context object is
-   * no longer needed and should be GCed. An example is the `RequestContext`,
+   * no longer needed and should be recycled. An example is the `RequestContext`,
    * which is created per request.
    */
   close() {
     this._debug('Closing context...');
-    for (const observer of this.observers) {
-      this.unsubscribe(observer);
-    }
+    this.observers.clear();
     this.registry.clear();
+    if (this._parent && this._parentEventListeners) {
+      for (const [event, listener] of this._parentEventListeners) {
+        this._parent.removeListener(event, listener);
+      }
+      this._parentEventListeners = undefined;
+    }
     this._parent = undefined;
   }
 
@@ -325,20 +373,22 @@ export class Context extends EventEmitter {
    *
    * @param eventType Event names: `bind` or `unbind`
    * @param binding Binding bound or unbound
+   * @param context Owner context
    * @param observers Current set of context observers
    */
   protected async notifyObservers(
     eventType: ContextEventType,
     binding: Readonly<Binding<unknown>>,
+    context: Context,
     observers = this.observers,
   ) {
     if (observers.size === 0) return;
 
     for (const observer of observers) {
       if (typeof observer === 'function') {
-        await observer(eventType, binding, this);
+        await observer(eventType, binding, context);
       } else if (!observer.filter || observer.filter(binding)) {
-        await observer.observe(eventType, binding, this);
+        await observer.observe(eventType, binding, context);
       }
     }
   }

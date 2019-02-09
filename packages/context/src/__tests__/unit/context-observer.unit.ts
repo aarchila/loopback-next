@@ -21,6 +21,9 @@ const setImmediateAsync = promisify(setImmediate);
  * for assertions
  */
 class TestContext extends Context {
+  get parentEventListeners() {
+    return this._parentEventListeners;
+  }
   /**
    * Wait until the context event queue is empty or an error is thrown
    */
@@ -58,27 +61,30 @@ describe('Context', () => {
       expect(subscription.closed).to.be.true();
     });
 
-    it('registers observers on context chain', () => {
-      const childCtx = new Context(ctx, 'child');
+    it('registers observers on context with parent', () => {
+      const childCtx = new TestContext(ctx, 'child');
+      expect(childCtx.parentEventListeners!.has('bind')).to.be.true();
+      expect(childCtx.parentEventListeners!.has('unbind')).to.be.true();
       childCtx.subscribe(nonMatchingObserver);
       expect(childCtx.isSubscribed(nonMatchingObserver)).to.true();
-      expect(ctx.isSubscribed(nonMatchingObserver)).to.true();
+      expect(ctx.isSubscribed(nonMatchingObserver)).to.false();
     });
 
     it('un-registers observers on context chain', () => {
       const childCtx = new Context(ctx, 'child');
       childCtx.subscribe(nonMatchingObserver);
       expect(childCtx.isSubscribed(nonMatchingObserver)).to.true();
-      expect(ctx.isSubscribed(nonMatchingObserver)).to.true();
+      expect(ctx.isSubscribed(nonMatchingObserver)).to.false();
       childCtx.unsubscribe(nonMatchingObserver);
       expect(childCtx.isSubscribed(nonMatchingObserver)).to.false();
       expect(ctx.isSubscribed(nonMatchingObserver)).to.false();
     });
 
     it('un-registers observers on context chain during close', () => {
-      const childCtx = new Context(ctx, 'child');
+      const childCtx = new TestContext(ctx, 'child');
       childCtx.subscribe(nonMatchingObserver);
       childCtx.close();
+      expect(childCtx.parentEventListeners).to.be.undefined();
       expect(childCtx.isSubscribed(nonMatchingObserver)).to.false();
       expect(ctx.isSubscribed(nonMatchingObserver)).to.false();
     });
@@ -247,25 +253,32 @@ describe('Context', () => {
     let app: Context;
     let server: Context;
 
-    let contextListener: MyObserverForControllers;
-    beforeEach(givenControllerListener);
+    let contextObserver: MyObserverForControllers;
+    beforeEach(givenControllerObserver);
 
     it('receives notifications of matching binding events', async () => {
       const controllers = await getControllers();
       // We have server: 1, app: 2
       // NOTE: The controllers are not guaranteed to be ['1', '2'] as the events
       // are emitted by two context objects and they are processed asynchronously
-      expect(controllers).to.containEql('1');
-      expect(controllers).to.containEql('2');
+      expect(controllers).to.containEql('1@server');
+      expect(controllers).to.containEql('2@app');
       server.unbind('controllers.1');
       // Now we have app: 2
-      expect(await getControllers()).to.eql(['2']);
+      expect(await getControllers()).to.eql(['2@app']);
       app.unbind('controllers.2');
       // All controllers are gone from the context chain
       expect(await getControllers()).to.eql([]);
       // Add a new controller - server: 3
       givenController(server, '3');
-      expect(await getControllers()).to.eql(['3']);
+      expect(await getControllers()).to.eql(['3@server']);
+    });
+
+    it('does not emit matching binding events from parent if shadowed', async () => {
+      // We have server: 1, app: 2
+      givenController(app, '1');
+      // All controllers are gone from the context chain
+      expect(await getControllers()).to.not.containEql('1@app');
     });
 
     it('reports error on current context if an observer fails', async () => {
@@ -297,19 +310,24 @@ describe('Context', () => {
     class MyObserverForControllers implements ContextObserver {
       controllers: Set<string> = new Set();
       filter = filterByTag('controller');
-      observe(event: ContextEventType, binding: Readonly<Binding<unknown>>) {
+      observe(
+        event: ContextEventType,
+        binding: Readonly<Binding<unknown>>,
+        context: Context,
+      ) {
+        const name = `${binding.tagMap.name}@${context.name}`;
         if (event === 'bind') {
-          this.controllers.add(binding.tagMap.name);
+          this.controllers.add(name);
         } else if (event === 'unbind') {
-          this.controllers.delete(binding.tagMap.name);
+          this.controllers.delete(name);
         }
       }
     }
 
-    function givenControllerListener() {
+    function givenControllerObserver() {
       givenServerWithinAnApp();
-      contextListener = new MyObserverForControllers();
-      server.subscribe(contextListener);
+      contextObserver = new MyObserverForControllers();
+      server.subscribe(contextObserver);
       givenController(server, '1');
       givenController(app, '2');
     }
@@ -327,7 +345,7 @@ describe('Context', () => {
     async function getControllers() {
       return new Promise<string[]>(resolve => {
         // Wrap it inside `setImmediate` to make the events are triggered
-        setImmediate(() => resolve(Array.from(contextListener.controllers)));
+        setImmediate(() => resolve(Array.from(contextObserver.controllers)));
       });
     }
 

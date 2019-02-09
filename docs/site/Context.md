@@ -236,14 +236,19 @@ The `Context` emits the following events:
 
 - `bind`: Emitted when a new binding is added to the context.
   - binding: the newly added binding object
+  - context: Owner context of the binding object
 - `unbind`: Emitted when an existing binding is removed from the context
   - binding: the newly removed binding object
+  - context: Owner context of the binding object
 - `error`: Emitted when an observer throws an error during the notification
   process
   - err: the error object thrown
 
 When an existing binding key is replaced with a new one, an `unbind` event is
 emitted for the existing binding followed by a `bind` event for the new binding.
+
+If a context has a parent, binding events from the parent are re-emitted on the
+context when the binding key does not exist within the current context.
 
 ## Context observers
 
@@ -344,9 +349,9 @@ If `filter` is not required, we can simply use `ContextObserverFn`.
 - `close()`
 
   Close the context and release references to other objects in the context
-  chain. Please note observers of a child context are also registered with its
-  parent context. As a result, the `close` method must be called to avoid memory
-  leak if the child context is to be recycled.
+  chain. Please note a child context registers event listeners with its parent
+  context. As a result, the `close` method must be called to avoid memory leak
+  if the child context is to be recycled.
 
 To react on context events asynchronously, we need to implement the
 `ContextObserver` interface or provide a `ContextObserverFn` and register it
