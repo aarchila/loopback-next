@@ -14,6 +14,7 @@ import {
   ContextEventObserver,
   ContextEventType,
   ContextObserver,
+  Notification,
   Subscription,
 } from './context-observer';
 import {ResolutionOptions, ResolutionSession} from './resolution-session';
@@ -152,8 +153,7 @@ export class Context extends EventEmitter {
 
     // The following are two async functions. Returned promises are ignored as
     // they are long-running background tasks.
-    this.startNotificationTask('bind').catch(notificationErrorHandler);
-    this.startNotificationTask('unbind').catch(notificationErrorHandler);
+    this.startNotificationTask().catch(notificationErrorHandler);
   }
 
   /**
@@ -197,32 +197,14 @@ export class Context extends EventEmitter {
 
   /**
    * Start a background task to listen on context events and notify observers
-   * @param eventType Context event type
    */
-  private async startNotificationTask(eventType: ContextEventType) {
-    const notificationEvent = `${eventType}-notification`;
-    this.on(eventType, (binding, context) => {
-      // No need to schedule notifications if no observers are present
-      if (this.observers.size === 0) return;
-      // Track pending events
-      this.pendingEvents++;
-      // Take a snapshot of current observers to ensure notifications of this
-      // event will only be sent to current ones. Emit a new event to notify
-      // current context observers.
-      this.emit(notificationEvent, {
-        binding,
-        context,
-        observers: new Set(this.observers),
-      });
-    });
-    // FIXME(rfeng): p-event should allow multiple event types in an iterator.
-    // Create an async iterator from the given event type
-    const events: AsyncIterable<{
-      binding: Readonly<Binding<unknown>>;
-      context: Context;
-      observers: Set<ContextEventObserver>;
-    }> = pEvent.iterator(this, notificationEvent);
-    for await (const {binding, context, observers} of events) {
+  private async startNotificationTask() {
+    this.setupNotification('bind', 'unbind');
+    const events: AsyncIterable<Notification> = pEvent.iterator(
+      this,
+      'notification',
+    );
+    for await (const {eventType, binding, context, observers} of events) {
       // The loop will happen asynchronously upon events
       try {
         // The execution of observers happen in the Promise micro-task queue
@@ -241,6 +223,31 @@ export class Context extends EventEmitter {
         // If no error listeners are registered, crash the process.
         this.emit('error', err);
       }
+    }
+  }
+
+  /**
+   * Listen on given event types and emit `notification` event. This method
+   * merge multiple event types into one for notification.
+   * @param eventTypes Context event types
+   */
+  private setupNotification(...eventTypes: ContextEventType[]) {
+    for (const eventType of eventTypes) {
+      this.on(eventType, (binding, context) => {
+        // No need to schedule notifications if no observers are present
+        if (this.observers.size === 0) return;
+        // Track pending events
+        this.pendingEvents++;
+        // Take a snapshot of current observers to ensure notifications of this
+        // event will only be sent to current ones. Emit a new event to notify
+        // current context observers.
+        this.emit('notification', {
+          eventType,
+          binding,
+          context,
+          observers: new Set(this.observers),
+        });
+      });
     }
   }
 

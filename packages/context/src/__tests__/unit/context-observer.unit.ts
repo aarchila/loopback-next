@@ -148,8 +148,8 @@ describe('Context', () => {
         'SYNC:foo:foo-value:bind',
         'ASYNC:foo:foo-value:bind',
         'SYNC:foo:foo-value:unbind',
-        'SYNC:foo:new-foo-value:bind',
         'ASYNC:foo:foo-value:unbind',
+        'SYNC:foo:new-foo-value:bind',
         'ASYNC:foo:new-foo-value:bind',
       ]);
       expect(nonMatchingObserverCalled).to.be.false();

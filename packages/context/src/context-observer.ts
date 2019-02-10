@@ -63,3 +63,25 @@ export interface Subscription {
    */
   closed: boolean;
 }
+
+/**
+ * Event data for observer notifications
+ */
+export type Notification = {
+  /**
+   * Context event type - bind/unbind
+   */
+  eventType: ContextEventType;
+  /**
+   * Binding added/removed
+   */
+  binding: Readonly<Binding<unknown>>;
+  /**
+   * Owner context for the binding
+   */
+  context: Context;
+  /**
+   * A snapshot of observers when the original event is emitted
+   */
+  observers: Set<ContextEventObserver>;
+};
